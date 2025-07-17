@@ -30,7 +30,9 @@ class DatasetFactory(object):
                 config.huggingface_dataset, tokenizer, text_processor, **kwargs
             )
         elif config.type == 'json':
-            return JsonDataset(config.json_dataset, tokenizer, text_processor, **kwargs)
+            return JsonDataset(
+                config.json_dataset, tokenizer, text_processor, **kwargs
+            )
         else:
             raise ValueError(f'Unknown dataset type: {config.type}')
 

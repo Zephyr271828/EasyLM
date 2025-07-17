@@ -24,6 +24,10 @@ from EasyLM.models.llama.llama_model import (
     LLaMAConfigurator, FlaxLLaMAForCausalLM
 )
 
+print("JAX devices:", jax.devices())
+
+from jax_smi import initialise_tracking
+initialise_tracking()
 
 FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     seed=42,
@@ -39,7 +43,8 @@ FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     add_bos_token=True,
     load_checkpoint='',
     tokenizer='openlm-research/open_llama_3b_v2',
-    llama=LLaMAConfigurator.get_default_config(),
+    # llama=LLaMAConfigurator.get_default_config(),
+    llama=LLaMAConfigurator.get_standard_llama_config('llama3_8b'),
     lm_server=LMServer.get_default_config(),
     jax_distributed=JaxDistributedConfig.get_default_config(),
 )
@@ -58,6 +63,7 @@ def main(argv):
     )
     tokenizer.pad_token = tokenizer.eos_token
     llama_config = LLaMAConfigurator.finalize_config(FLAGS.llama)
+    print(llama_config)
 
     with jax.default_device(jax.devices("cpu")[0]):
         _, params = StreamingCheckpointer.load_trainstate_checkpoint(
@@ -80,10 +86,23 @@ def main(argv):
         model_ps, get_float_dtype_by_name(FLAGS.param_dtype)
     )
 
+    # @partial(
+    #     pjit,
+    #     in_shardings=(model_ps, PS(), PS()),
+    #     out_shardings=(PS(), PS(), PS())
+    # )
     @partial(
         pjit,
-        in_shardings=(model_ps, PS(), PS()),
-        out_shardings=(PS(), PS(), PS())
+        in_shardings=(
+            model_ps,        # shard params along the fsdp axis
+            PS(),            # rng is small — keep it fully replicated
+            PS('dp', None),  # shard the batch’s leading axis over dp
+        ),
+        out_shardings=(
+            PS('dp'),  # return loglikelihood sharded over dp
+            PS(),            # is_greedy replicated
+            PS(),            # new_rng replicated
+        )
     )
     def forward_loglikelihood(params, rng, batch):
         batch = with_sharding_constraint(batch, PS(('dp', 'fsdp')))
@@ -164,6 +183,7 @@ def main(argv):
         return output, rng_generator()
 
     mesh = LLaMAConfigurator.get_jax_mesh(FLAGS.mesh_dim)
+    # print(mesh)
     with mesh:
         params = tree_apply(shard_fns, params)
         sharded_rng = next_rng()
